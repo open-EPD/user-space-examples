@@ -2,29 +2,46 @@ import cv2
 import math
 
 im = cv2.imread("test.png")
-im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-path = 'test' + "_HEX.txt"
-f = open(path, 'w')
-f.write("uint32_t img1_hex[{:d}][{:d}] = {{\n".format(im.shape[0], int(im.shape[1]/16+(1,0)[im.shape[1]%16 == 0])))
+if im is None:
+    print("Error: Could not read image 'test.png'")
+    exit()
 
+im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+filename = "png_HEX.h"
+
+f = open(filename, 'w')
+f.write("#ifndef PNG_HEX_H\n")
+f.write("#define PNG_HEX_H\n\n")
+f.write("#include <stdint.h>\n\n")
+
+width_words = int(im.shape[1]/16)+(1,0)[im.shape[1]%16 == 0]
+f.write("static uint32_t img_hex[{:d}][{:d}] = {{\n".format(im.shape[0], width_words))
 
 for x in range(im.shape[0]):
-    f.write("{")
-    for y in range(int(im.shape[1]/16)+(1,0)[im.shape[1]%16 == 0]):
+    f.write("    {")
+    for y in range(width_words):
         dcd = 0b00
         for j in range(16):
-            dxd=0b01
             if(y*16+j >= im.shape[1]):
                 continue
             r, g, b = im[x, y*16+j]
-            if((r,g,b) == (0xFF,0xFF,0x00)):
+            dxd = 0b01  # default
+            if((r,g,b) == (0xFF,0xFF,0x00)):  # Yellow
                 dxd=0b10
-            if((r,g,b) == (0x00,0x00,0x00)):
+            elif((r,g,b) == (0x00,0x00,0x00)):  # Black
                 dxd=0b00
-            if((r,g,b) == (0xFF,0x00,0x00)):
+            elif((r,g,b) == (0xFF,0x00,0x00)):  # Red
                 dxd=0b11
             dcd = dxd<<((15-j)*2) | dcd
-        f.write("0x{:08x},".format(dcd))
+        f.write("0x{:08x}, ".format(dcd))
     f.write("}, \n")
-f.write("};")
+f.write("};\n\n")
+
+f.write("#define IMG_HEIGHT {:d}\n".format(im.shape[0]))
+f.write("#define IMG_WIDTH {:d}\n".format(im.shape[1]))
+f.write("#define IMG_WIDTH_WORDS {:d}\n".format(width_words))
+
+f.write("#endif /* PNG_HEX_H */\n")
 f.close()
+
+print(f"Successfully created {filename}")
