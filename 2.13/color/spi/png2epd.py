@@ -19,12 +19,16 @@ f.write("static uint32_t img_hex[{:d}][{:d}] = {{\n".format(im.shape[0], width_w
 
 for x in range(im.shape[0]):
     f.write("    {")
-    for y in range(width_words):
+    for y_word in range(width_words):
         dcd = 0b00
         for j in range(16):
-            if(y*16+j >= im.shape[1]):
+            pixel_index_col = im.shape[1] - 1 - (y_word * 16 + j)
+            if(pixel_index_col < 0):
                 continue
-            r, g, b = im[x, y*16+j]
+            if(pixel_index_col >= im.shape[1]):
+                continue
+
+            r, g, b = im[x, pixel_index_col]
             dxd = 0b01  # default
             if((r,g,b) == (0xFF,0xFF,0x00)):  # Yellow
                 dxd=0b10
