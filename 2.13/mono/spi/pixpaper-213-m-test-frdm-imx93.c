@@ -1,0 +1,507 @@
+/*
+ * Author: LC Wang <zaq14760@gmail.com>
+ * Date: 2025-05-23
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
+ * USA.
+ */
+
+#include <fcntl.h>
+#include <gpiod.h>
+#include <linux/spi/spidev.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <time.h>
+#include <unistd.h>
+#define EPD_SPI_DEVICE "/dev/spidev0.0"
+#define EPD_GPIO_CHIP "gpiochip0"
+
+#define EPD_DC_PIN 0
+#define EPD_RST_PIN 5
+#define EPD_BUSY_PIN 26
+
+#define SPI_SPEED 5000000
+
+#define EPD_FAST 0
+#define EPD_FULL 1
+#define EPD_PART 2
+
+int mode = EPD_FAST;
+int spi_fd;
+struct gpiod_chip *chip;
+struct gpiod_line *epd_dc_line, *epd_rst_line, *epd_busy_line;
+
+const unsigned char lut_full_update[] = {
+    0x80, 0x60, 0x40, 0x00, 0x00, 0x00, 0x00, // LUT0: BB:     VS 0 ~7
+    0x10, 0x60, 0x20, 0x00, 0x00, 0x00, 0x00, // LUT1: BW:     VS 0 ~7
+    0x80, 0x60, 0x40, 0x00, 0x00, 0x00, 0x00, // LUT2: WB:     VS 0 ~7
+    0x10, 0x60, 0x20, 0x00, 0x00, 0x00, 0x00, // LUT3: WW:     VS 0 ~7
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // LUT4: VCOM:   VS 0 ~7
+
+    0x03, 0x03, 0x00, 0x00, 0x05, // TP0 A~D RP0
+    0x09, 0x09, 0x00, 0x00, 0x05, // TP1 A~D RP1
+    0x03, 0x03, 0x00, 0x00, 0x0C, // TP2 A~D RP2
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP3 A~D RP3
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP4 A~D RP4
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP5 A~D RP5
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP6 A~D RP6
+
+    0x17, 0x41, 0x9B, 0x3A, 0x0F, 0x04,
+};
+
+const unsigned char lut_partial_update[] = {
+    // 20 bytes
+    0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // LUT0: BB:     VS 0 ~7
+    0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, // LUT1: BW:     VS 0 ~7
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // LUT2: WB:     VS 0 ~7
+    0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, // LUT3: WW:     VS 0 ~7
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // LUT4: VCOM:   VS 0 ~7
+
+    0x02, 0x00, 0x00, 0x00, 0x00, // TP0 A~D RP0
+    0x05, 0x00, 0x00, 0x00, 0x00, // TP1 A~D RP1
+    0x0E, 0x00, 0x00, 0x00, 0x01, // TP2 A~D RP2
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP3 A~D RP3
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP4 A~D RP4
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP5 A~D RP5
+    0x00, 0x00, 0x00, 0x00, 0x00, // TP6 A~D RP6
+
+    0x15, 0x41, 0x9B, 0x3A, 0x0F, 0x04,
+};
+
+uint32_t img0[] = {
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFEF, 0xFFFFFFFF, 0xF7FFFFFF, 0xFFFFE000, 
+    0xFCF9FFFF, 0xFFFFF7FF, 0xFFFFFF80, 0x07FF9F7F, 0xFFFFFE7F, 0xDBFFFFFF, 0xFF3FE000, 
+    0xFDF9FFFF, 0xFFFFF7EF, 0xFFFFFF80, 0x07FF9FBF, 0xFFFFFE7F, 0xDFFFFFFF, 0xCF3FE000, 
+    0xFDF9FFFF, 0xFFFFF7FF, 0xC0007FFF, 0xFFFF9FFF, 0xFFFFFE7F, 0xFFFFFFFF, 0xEF3FE000, 
+    0xFDF9FFFF, 0xFFFFF7FF, 0xC0007FFF, 0xFFFF9FFF, 0xFFFFFE7F, 0xFFFFFFFF, 0xEF3FE000, 
+    0xC0001FFF, 0xFFF0000F, 0xCFFE7FFF, 0xFFE0003F, 0xFFFFFE7F, 0x9FFFFFFF, 0xCF3FE000, 
+    0xC0001FFC, 0xFFF0000F, 0xCFFE7FFF, 0xFFE0003F, 0xFFFFFE7C, 0x1FFFFFFF, 0xCF3FE000, 
+    0xFDF9FF9C, 0xFBFFF7FF, 0xCFFE7E00, 0x03FF9F3F, 0xFFFFFE60, 0xFFFFFFFF, 0xCF3FE000, 
+    0xFDF9FFDE, 0xF3FFF7FF, 0xCFFE7E00, 0x03FFBF3F, 0x00007E03, 0xFFC0001F, 0xCF3FE000, 
+    0xFDF9FFDE, 0xF3FFF7FF, 0xCFFE7FFF, 0xF7FFBF3F, 0x00007E3F, 0xFFC0001F, 0xCF3FE000, 
+    0xFDF9FFCF, 0xF7FEF79F, 0xCFFE7FFF, 0xE7FF3F3F, 0x00007E7F, 0xFFC0001F, 0xCF3FE000, 
+    0xFCF9FFFF, 0xE7FCF7DF, 0xCFFE7FFF, 0xE7FF3F3F, 0xFFFFFE7F, 0xFFFFFFFF, 0xCF3EE000, 
+    0xFFF9FFFF, 0xEFF9F7CF, 0xCFFE7FFF, 0xCFFE7F3F, 0xFFFFFE7F, 0xFFFFFFFF, 0x9F3CE000, 
+    0xFFFBFFFF, 0xCFFBF7EF, 0xCFFE7FFF, 0x9FFE7F3F, 0xFFFFFE7F, 0xFFFFFFFF, 0x9F31E000, 
+    0xFFF3FFFF, 0x9FF3F7E7, 0xCFFE7FFF, 0x3FFCFF3F, 0xFFFFFE7F, 0xFFFFFFFF, 0x3F03E000, 
+    0xFFE7FFFF, 0x3FFFF7FF, 0xC0007FFE, 0x7FF9FF7F, 0xFFFFFE7F, 0xFFFFFFFF, 0x3F0FE000, 
+    0xFFCFFFFC, 0x7FFFE7FF, 0xC0007FF8, 0xFFF1F07F, 0xFFFFFE00, 0x0FFFFFFE, 0x7F1FE000, 
+    0xFF1FFFF1, 0xFFFF87FF, 0xCFFE7FE3, 0xFFF3F0FF, 0xFFFFFF00, 0x0FFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFB, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFF3FF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xF03FFFFF, 0xFFFFF3FF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xF03E0F83, 0xFFFFF3FF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xF7FDEF7B, 0xFFFFF3FF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xF7FDE779, 0xDFFFF3FF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xF7F9E679, 0xC001F3FF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xF0F9E679, 0xCF3CF3FF, 0xFFFFFFFF, 0xFFFE01FF, 0xFFFFC01F, 0xFFFE03FF, 0xFFFFE000, 
+    0xF039E679, 0xCF3CF3FF, 0xFFFFFFFF, 0xFFF8007F, 0xFFFFC01F, 0xFFF0007F, 0xFFFFE000, 
+    0xFF99E679, 0xCF3CF3FF, 0xFFFFFFFF, 0xFFE0001F, 0xFFFF803F, 0xFFE0001F, 0xFFFFE000, 
+    0xFF99E679, 0xCF3CF3FF, 0xFFFFFFFF, 0xFFC0000F, 0xFFFF803F, 0xFF80000F, 0xFFFFE000, 
+    0xFF9DE779, 0xCF3CF3FF, 0xFFFFFFFF, 0xFF800007, 0xFFFF007F, 0xFF000007, 0xFFFFE000, 
+    0xFFBDEF7B, 0xCF3CF3FF, 0xFFFFFFFF, 0xFF000007, 0xFFFF007F, 0xFE000003, 0xFFFFE000, 
+    0xE03E0F83, 0xCF3CF3FF, 0xFFFFFFFF, 0xFF000003, 0xFFFE007F, 0xFE000003, 0xFFFFE000, 
+    0xFFFFFFFF, 0xCF3CF3FF, 0xFFFFFFFF, 0xFE000001, 0xFFFE00FF, 0xFC000001, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFE000001, 0xFFFC00FF, 0xFC000001, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFC000001, 0xFFFC01FF, 0xFC01F800, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFC00F800, 0xFFF801FF, 0xF801FC00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFC01FC00, 0xFFF803FF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFC01FC00, 0xFFF003FF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF803FE00, 0xFFF007FF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF803FE00, 0xFFE007FF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF803FE00, 0xFFE00FFF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF803FE00, 0xFFC00FFF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF007FE00, 0xFFC01FFF, 0xF803FE00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF007FE00, 0xFF8001FF, 0xFC01FC00, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF007FC00, 0xFF80003F, 0xFC00F801, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFC00, 0xFF00000F, 0xFE000001, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFC00, 0xFF000007, 0xFE000003, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFF801, 0xFE000007, 0xFF000007, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFF801, 0xFE000003, 0xFF80000F, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFF001, 0xFC000001, 0xFFC0001F, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFF003, 0xFC000001, 0xFFC0000F, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE003, 0xFC000000, 0xFF000007, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE007, 0xFC00FC00, 0xFE000003, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFC007, 0xF801FE00, 0xFE000001, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFC00F, 0xF801FE00, 0x7C000001, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFF800F, 0xF803FF00, 0x78007800, 0xFFFFE000, 
+    0xFFFFF9FF, 0xFCFCFFF3, 0xFFFF9FDF, 0xFFFF801F, 0xF003FF00, 0x7801FC00, 0xFFFFE000, 
+    0xFFFFF9FF, 0xFDFCFFF7, 0xFFFF9F9F, 0xFFFF001F, 0xF003FF00, 0x7801FE00, 0xFFFFE000, 
+    0xFFFFF9FF, 0xF9FCFFE4, 0x000F9F80, 0xFFFF003F, 0xF007FF00, 0x7003FE00, 0x7FFFE000, 
+    0xFFFFF9FF, 0xFBFCFFEC, 0x000F9F00, 0xFFFE003F, 0xF007FF80, 0x7003FF00, 0x7FFFE000, 
+    0xFFF80001, 0xF30003CF, 0xCCFC067D, 0xFFFC007F, 0xF807FF80, 0x7007FF00, 0x7FFFE000, 
+    0xFFF80001, 0xF30003CF, 0xCCFC0439, 0xFFFC00FF, 0xF007FF00, 0x7007FF00, 0x7FFFE000, 
+    0xFFFFE07F, 0xE3F87F8F, 0xCCFF9DDB, 0xFFF800FF, 0xF007FF00, 0x7007FF00, 0x7FFFE000, 
+    0xFFFFE07F, 0xC3F07F0E, 0x001F9FC3, 0xFFF801FF, 0xF007FF00, 0x7007FF00, 0x60006000, 
+    0xFFFFE07F, 0xC3F4BF4E, 0x001F8FE7, 0xFFF001FF, 0xF003FF00, 0x7007FF00, 0x60006000, 
+    0xFFFFC93F, 0xFBE4BFCE, 0xCDDF07C3, 0xFFF003FF, 0xF003FF00, 0x7003FF00, 0x6F9F6000, 
+    0xFFFF999F, 0xFBEC9FCE, 0xCDDF1738, 0xFFE003FF, 0xF803FE00, 0x7003FE00, 0x6F9F6000, 
+    0xFFFFB9CF, 0xFBCCDFCE, 0xCDDF9C7E, 0x7FC007FF, 0xF801FC00, 0xF001FE00, 0x6F9F6000, 
+    0xFFFF39C7, 0xFBDCCFCE, 0xCDDE9C00, 0x7FC007FF, 0xF800F800, 0xF001FC00, 0x6F9F6000, 
+    0xFFFE79E3, 0xFB9CEFCE, 0xCDDE9F00, 0xFF800000, 0xF8000000, 0xF8002000, 0x6F9F6000, 
+    0xFFF88011, 0xFB3CE7CE, 0xCDDD9F7E, 0xFF800000, 0xFC000001, 0xF8000000, 0xE0006000, 
+    0xFFF98019, 0xFB6033CE, 0xCDDF9F7E, 0xFF000000, 0xFC000001, 0xF8000000, 0xEFFF6000, 
+    0xFFFFF9FF, 0xFBE03FCE, 0xCDDF9F7E, 0xFF000000, 0xFE000003, 0xFC000001, 0xEFFF6000, 
+    0xFFFFF9FF, 0xFBFCFFCE, 0x001F9F7E, 0xFE000000, 0xFF000003, 0xFE000003, 0xEFFF6000, 
+    0xFFFFF9FF, 0xFBFCFFCE, 0x001F9F00, 0xFC000000, 0xFF800007, 0xFE000003, 0xEFFF6000, 
+    0xFFFFF9FF, 0xFBFCFFCE, 0xFFDF9F00, 0xFC000000, 0xFFC0000F, 0xFF00000F, 0xEFFF6000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF8000000, 0xFFE0001F, 0xFFC0001F, 0xEFFF6000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xF8000000, 0xFFF8007F, 0xFFF0007F, 0xEFFC6000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFE01FF, 0xFFFC01FF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000, 
+    0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFE000,
+};
+
+void sleep_ms(unsigned int milliseconds) {
+	struct timespec ts;
+	ts.tv_sec = milliseconds / 1000;
+	ts.tv_nsec = (milliseconds % 1000) * 1000000;
+	nanosleep(&ts, NULL);
+}
+
+void sleep_us(unsigned int microseconds) {
+	struct timespec ts;
+	ts.tv_sec = microseconds / 1000000;
+	ts.tv_nsec = (microseconds % 1000000) * 1000;
+	nanosleep(&ts, NULL);
+}
+
+void spi_write(uint8_t *data, int len) {
+	struct spi_ioc_transfer tr = {
+	    .tx_buf = (unsigned long)data,
+	    .len = len,
+	    .speed_hz = SPI_SPEED,
+	    .bits_per_word = 8,
+	};
+	ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
+}
+
+void epd_writeCommand(uint8_t command) {
+	gpiod_line_set_value(epd_dc_line, 0);
+	sleep_us(1);
+	spi_write(&command, 1);
+}
+
+void epd_writeData(uint8_t data) {
+	gpiod_line_set_value(epd_dc_line, 1);
+	sleep_us(1);
+	spi_write(&data, 1);
+}
+
+void epd_waitUntilIdle() {
+	sleep_ms(2);
+	while (true) {
+		if (gpiod_line_get_value(epd_busy_line) == 0) {
+			break;
+		}
+	}
+}
+
+void epd_HWreset() {
+	sleep_ms(50);
+	gpiod_line_set_value(epd_rst_line, 0);
+	sleep_ms(50);
+	gpiod_line_set_value(epd_rst_line, 1);
+	sleep_ms(50);
+}
+
+uint8_t img_fetch_hex_32(int y, int x, uint32_t *img_src) {
+
+	int hsize = 212 / 32 + (212 % 32 == 0 ? 0 : 1);
+	if (y >= 103 || x >= 211) {
+		return 0b1;
+	} else {
+		uint32_t target = *(img_src + hsize * y + (x / 32));
+		return (target) >> ((31 - x % 32)) & 0b1;
+	}
+}
+
+void epd_init() {
+
+	spi_fd = open(EPD_SPI_DEVICE, O_RDWR);
+	if (spi_fd < 0) {
+		perror("Error opening SPI device");
+		exit(1);
+	}
+
+	uint8_t mode = SPI_MODE_0;
+	ioctl(spi_fd, SPI_IOC_WR_MODE, &mode);
+
+	uint32_t speed = SPI_SPEED;
+	ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+
+	chip = gpiod_chip_open_by_name(EPD_GPIO_CHIP);
+	if (!chip) {
+		perror("Error opening GPIO chip");
+		exit(1);
+	}
+
+	epd_dc_line = gpiod_chip_get_line(chip, EPD_DC_PIN);
+	epd_rst_line = gpiod_chip_get_line(chip, EPD_RST_PIN);
+	epd_busy_line = gpiod_chip_get_line(chip, EPD_BUSY_PIN);
+
+	if (!epd_dc_line || !epd_rst_line || !epd_busy_line) {
+		perror("Error getting GPIO lines");
+		gpiod_chip_close(chip);
+		exit(1);
+	}
+
+	gpiod_line_request_output(epd_dc_line, "epd_dc", 0);
+	gpiod_line_request_output(epd_rst_line, "epd_rst", 0);
+	gpiod_line_request_input(epd_busy_line, "epd_busy");
+
+	printf("start\n");
+	epd_HWreset();
+	sleep_ms(1000);
+	epd_waitUntilIdle();
+	printf("reset successed\n");
+
+	if (mode == EPD_FULL) {
+		epd_waitUntilIdle();
+		epd_writeCommand(0x12);
+		epd_waitUntilIdle();
+
+		epd_writeCommand(0x01);
+		epd_writeData(0xF9);
+		epd_writeData(0x00);
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x11);
+		epd_writeData(0x01);
+
+		epd_writeCommand(0x44);
+		epd_writeData(0x00);
+		epd_writeData(12);
+
+		epd_writeCommand(0x45);
+		epd_writeData(0b0);
+		epd_writeData(0x00);
+		epd_writeData(212); // 104x212
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x4E);
+		epd_writeData(0x00);
+		epd_writeCommand(0x4F);
+		epd_writeData(0xD3);
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x03);
+		epd_writeData(lut_full_update[70]);
+
+		epd_writeCommand(0x04); //
+		epd_writeData(lut_full_update[71]);
+		epd_writeData(lut_full_update[72]);
+		epd_writeData(lut_full_update[73]);
+
+		epd_writeCommand(0x3A); // Dummy Line
+		epd_writeData(lut_full_update[74]);
+		epd_writeCommand(0x3B); // Gate time
+		epd_writeData(lut_full_update[75]);
+
+		epd_writeCommand(0x32);
+		for (int count = 0; count < 70; count++) {
+			epd_writeData(lut_full_update[count]);
+		}
+		epd_writeCommand(0x3C);
+		epd_writeData(0x05);
+
+		epd_writeCommand(0x21);
+		epd_writeData(0x00);
+		epd_writeData(0x80);
+
+		epd_writeCommand(0x18);
+		epd_writeData(0x80);
+		epd_waitUntilIdle();
+	}
+	if (mode == EPD_FAST) {
+		epd_waitUntilIdle();
+		epd_writeCommand(0x12);
+		epd_waitUntilIdle();
+
+		epd_writeCommand(0x0C);
+		epd_writeData(0b11110100);
+		epd_writeData(0b11110100);
+		epd_writeData(0b11110100);
+		epd_writeData(0b0);
+
+		epd_writeCommand(0x18);
+		epd_writeData(0x80);
+
+		epd_writeCommand(0x11);
+		epd_writeData(0x01);
+
+		epd_writeCommand(0x44);
+		epd_writeData(0x00);
+		epd_writeData(12);
+
+		epd_writeCommand(0x45);
+		epd_writeData(0b0);
+		epd_writeData(0x00);
+		epd_writeData(212); // 104x212
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x4E);
+		epd_writeData(0x00);
+		epd_writeCommand(0x4F);
+		epd_writeData(0xD3);
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x22);
+		epd_writeData(0xB1);
+		epd_writeCommand(0x20);
+		epd_waitUntilIdle();
+
+		epd_writeCommand(0x1A);
+		epd_writeData(0x64);
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x22);
+		epd_writeData(0x91);
+		epd_writeCommand(0x20);
+		epd_waitUntilIdle();
+	}
+
+	if (mode == EPD_PART) {
+		epd_HWreset();
+
+		epd_writeCommand(0x2C);
+		epd_writeData(0x26);
+		epd_waitUntilIdle();
+
+		epd_writeCommand(0x03);
+		epd_writeData(lut_partial_update[70]);
+
+		epd_writeCommand(0x04); //
+		epd_writeData(lut_partial_update[71]);
+		epd_writeData(lut_partial_update[72]);
+		epd_writeData(lut_partial_update[73]);
+
+		epd_writeCommand(0x3A); // Dummy Line
+		epd_writeData(lut_partial_update[74]);
+		epd_writeCommand(0x3B); // Gate time
+		epd_writeData(lut_partial_update[75]);
+
+		epd_writeCommand(0x32);
+		for (int count = 0; count < 70; count++) {
+			epd_writeData(lut_partial_update[count]);
+		}
+
+		epd_writeCommand(0x37);
+		epd_writeData(0x00);
+		epd_writeData(0x00);
+		epd_writeData(0x00);
+		epd_writeData(0x00);
+		epd_writeData(0x40);
+		epd_writeData(0x80);
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x11);
+		epd_writeData(0x01);
+
+		epd_writeCommand(0x44);
+		epd_writeData(0x00);
+		epd_writeData(12);
+
+		epd_writeCommand(0x45);
+		epd_writeData(0);
+		epd_writeData(0x00);
+		epd_writeData(212); // 104x212
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x4E);
+		epd_writeData(0x00);
+		epd_writeCommand(0x4F);
+		epd_writeData(0xD3);
+		epd_writeData(0x00);
+
+		epd_writeCommand(0x22);
+		epd_writeData(0xC0);
+
+		epd_writeCommand(0x20);
+		epd_waitUntilIdle();
+
+		epd_writeCommand(0x3C);
+		epd_writeData(0x01);
+	}
+}
+
+void epd_write_img(uint32_t *img_src) {
+	epd_writeCommand(0x24);
+	sleep_ms(10);
+
+	for (uint i = 0; i < 212; i++) {
+		for (uint j = 0; j < 13; j++) {
+			uint8_t ty = 0;
+			for (int ij1 = 0; ij1 < 8; ij1++) {
+				ty = (img_fetch_hex_32(j * 8 + ij1, i, img_src) << (7 - ij1)) |
+				     ty;
+			}
+			epd_writeData(ty);
+		}
+	}
+	printf("write image successed, starting update image\n");
+
+	epd_writeCommand(0x22);
+	sleep_ms(10);
+	epd_writeData(0xF7);
+	epd_writeCommand(0x20);
+	epd_waitUntilIdle();
+
+	printf("update image successed\n");
+
+	gpiod_line_set_value(epd_rst_line, 0);
+	gpiod_line_set_value(epd_dc_line, 0);
+}
+
+int main() {
+	while (true) {
+		epd_init();
+		epd_write_img(&img0[0]);
+		sleep_ms(30 * 1000);
+	}
+
+	close(spi_fd);
+	gpiod_line_release(epd_dc_line);
+	gpiod_line_release(epd_rst_line);
+	gpiod_line_release(epd_busy_line);
+	gpiod_chip_close(chip);
+
+	return 0;
+}
