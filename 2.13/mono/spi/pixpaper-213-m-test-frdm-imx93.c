@@ -485,14 +485,11 @@ void epd_write_img(uint32_t *img_src) {
 	epd_waitUntilIdle();
 
 	printf("update image successed\n");
-
-	gpiod_line_set_value(epd_rst_line, 0);
-	gpiod_line_set_value(epd_dc_line, 0);
 }
 
 int main() {
+	epd_init();
 	while (true) {
-		epd_init();
 		epd_write_img(&img0[0]);
 		sleep_ms(30 * 1000);
 	}
