@@ -463,6 +463,13 @@ void epd_init() {
 }
 
 void epd_write_img(uint32_t *img_src) {
+
+	epd_writeCommand(0x4E);
+	epd_writeData(0x00);
+	epd_writeCommand(0x4F);
+	epd_writeData(0xD3);
+	epd_writeData(0x00);
+
 	epd_writeCommand(0x24);
 	sleep_ms(10);
 
