@@ -1,0 +1,6 @@
+# keep source video and generated packs out of the repo
+*.mp4
+*.mkv
+*.webm
+*.gif
+*.epdv
